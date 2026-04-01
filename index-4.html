@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>🌿 Finca Oasis</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { -webkit-tap-highlight-color: transparent; background: #F5F0E8; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+// ── CONFIG ────────────────────────────────────────────────────────
+const SCRIPT_URL_HARDCODED = "https://script.google.com/macros/s/AKfycbxaMncEAHVHRKD8t_Xncnw15UTg0yZUnFd7gdy7ToJW3KyJNVDB9fsXX--aBaEONu-L/exec";
+const DEFAULT_PINS = { Steve:"0000", Astrid:"1111", Saul:"2222", Rafa:"3333" };
+
+const OPTS = {
+  categorias:["Alimentación","Combustible/Gas","Construcción","Electricidad","Ferretería","Limpieza","Mantenimiento","Materiales","Salud","Servicios","Transporte","Veterinaria","Otro"],
+  zonas:["Akwanganda","Jardín de Edén","Piscina","Zona Común","Ubuntu","Cocina Principal","Gazebo Oasis","Edificio A","Edificio B","Salón A","Salón B","Salón C","Salón D","Tienda","Farma Animal","Finca B","Finca C","Casa Roja","Studio Centro","Gasto Personal Steve","Por Definir"],
+  modoPago:["Efectivo","Transferencia","Tarjeta"],
+  proveedores:["Tropigas","Credigas Nativa","Gas Elena","Gulestraem","Ferretería Gotier","Ferretería Maderera","Ferretería Bolívar","Agroveterinaria Cruz Gómez","Caucedo Truck Parts","Repuestos Vásquez","BM Cargo","Claro","Coravo","El Bravo Lavandería","Jerez Lavandería","Farmacia San Andrés","Otro"],
+};
+
+const STATUS_INFO = {
+  pendiente_astrid:{ label:"Pendiente Astrid", color:"#D68910", bg:"#FEF9E7", icon:"⏳" },
+  pendiente_steve: { label:"Pendiente Steve",  color:"#2471A3", bg:"#EBF5FB", icon:"📤" },
+  aprobado:        { label:"Aprobado",          color:"#1E8449", bg:"#E9F7EF", icon:"✅" },
+  rechazado:       { label:"Rechazado",         color:"#B03A2E", bg:"#FDECEA", icon:"❌" },
+  comprado:        { label:"Comprado",          color:"#1B4332", bg:"#D5F5E3", icon:"🧾" },
+};
+
+const C = {
+  bg:"#F5F0E8", card:"#FFFEFB", primary:"#1B4332", primaryH:"#2D6A4F",
+  accent:"#C9A84C", accentL:"#FDF5D0",
+  danger:"#B03A2E", dangerL:"#FDECEA",
+  success:"#1E8449", successL:"#E9F7EF",
+  info:"#2471A3", infoL:"#EBF5FB",
+  border:"#DDD5C5", muted:"#888", text:"#1a1a1a", textL:"#555",
+};
+
+const ICONS = { Steve:"👑", Astrid:"📋", Saul:"🚚", Rafa:"🔧" };
+const fmtDOP = n => `${Number(n||0).toLocaleString("es-DO")} DOP`;
+const genId  = () => `FO-${Date.now().toString(36).toUpperCase()}`;
+const hoy    = () => new Date().toISOString().slice(0,10);
+const mesActual = () => new Date().toISOString().slice(0,7);
+
+// ── API GOOGLE SHEETS ─────────────────────────────────────────────
+// Todo via doPost para evitar problemas CORS con redirects de doGet
+async function sheetPost(url, data) {
+  const res = await fetch(url, {
+    method:"POST",
+    headers:{"Content-Type":"text/plain"},
+    body:JSON.stringify(data),
+  });
+  return await res.json();
+}
+
+const API = {
+  getData:         url => sheetPost(url, { action:"getData" }),
+  addPurchase:     (url, p)    => sheetPost(url, { action:"addPurchase",    purchase:p }),
+  updatePurchase:  (url, id, u)=> sheetPost(url, { action:"updatePurchase", id, updates:u }),
+  addReimbursement:(url, r)    => sheetPost(url, { action:"addReimbursement", reimbursement:r }),
+  savePins:        (url, pins) => sheetPost(url, { action:"savePins", pins }),
+};
+
+// ── APPS SCRIPT CODE ──────────────────────────────────────────────
+const SCRIPT_CODE = `// ═══════════════════════════════════════════════════════
+// FINCA OASIS — Backend completo v2
+// Extensions → Apps Script → pegar → guardar → Deploy
+// Execute as: Me | Who has access: Anyone
+// ═══════════════════════════════════════════════════════
+
+const SS = SpreadsheetApp.getActiveSpreadsheet();
+
+const SOL_H  = ["id","fecha","proveedor","descripcion","categoria","zona","detalle","monto","modoPago","compradoPor","estado","urgente","nota","aprobadoEn","rechazadoEn","motivoRechazo","rechazadoPor","revisadoPorAstrid","compradoEn","facturaRef","sincronizado","createdAt"];
+const REIMB_H = ["id","fecha","persona","monto","nota"];
+const PIN_H   = ["usuario","pin"];
+
+function getSheet(name, headers) {
+  let s = SS.getSheetByName(name);
+  if (!s) { s = SS.insertSheet(name); s.getRange(1,1,1,headers.length).setValues([headers]); }
+  return s;
+}
+
+function toObjs(sheet, headers) {
+  const rows = sheet.getDataRange().getValues();
+  if (rows.length <= 1) return [];
+  return rows.slice(1).filter(r => r[0]).map(r => {
+    const o = {}; headers.forEach((h,i) => { o[h] = r[i]; }); return o;
+  });
+}
+
+function respond(data) {
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  try {
+    const d = JSON.parse(e.postData.contents);
+
+    // ── LEER TODO ──
+    if (d.action === "getData") {
+      const pSheet = getSheet("Solicitudes", SOL_H);
+      const rSheet = getSheet("Reembolsos",  REIMB_H);
+      const pinSheet = getSheet("Pins", PIN_H);
+
+      const purchases = toObjs(pSheet, SOL_H).map(p => ({
+        ...p, monto:Number(p.monto)||0,
+        urgente: p.urgente===true||p.urgente==="TRUE"||p.urgente==="true",
+        sincronizado: p.sincronizado===true||p.sincronizado==="TRUE",
+      }));
+      const reimbursements = toObjs(rSheet, REIMB_H).map(r => ({
+        ...r, monto:Number(r.monto)||0
+      }));
+      const pinsData = toObjs(pinSheet, PIN_H);
+      const pins = {...{"Steve":"0000","Astrid":"1111","Saul":"2222","Rafa":"3333"}};
+      pinsData.forEach(p => { if(p.usuario) pins[p.usuario] = String(p.pin); });
+
+      return respond({ success:true, purchases, reimbursements, pins });
+    }
+
+    // ── AÑADIR SOLICITUD ──
+    if (d.action === "addPurchase") {
+      const sheet = getSheet("Solicitudes", SOL_H);
+      sheet.appendRow(SOL_H.map(h => d.purchase[h] !== undefined ? d.purchase[h] : ""));
+      return respond({ success:true });
+    }
+
+    // ── ACTUALIZAR SOLICITUD ──
+    if (d.action === "updatePurchase") {
+      const sheet = getSheet("Solicitudes", SOL_H);
+      const rows = sheet.getDataRange().getValues();
+      const idCol = SOL_H.indexOf("id");
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i][idCol] === d.id) {
+          Object.entries(d.updates).forEach(([key, val]) => {
+            const col = SOL_H.indexOf(key);
+            if (col >= 0) sheet.getRange(i+1, col+1).setValue(val);
+          });
+          // Si estado=comprado → también añadir a Gastos e Ingresos
+          if (d.updates.estado === "comprado") {
+            const gastosSheet = SS.getSheetByName("Gastos e Ingresos");
+            if (gastosSheet) {
+              const p = {}; SOL_H.forEach((h,i) => { p[h] = rows[i] !== undefined ? rows[i] : ""; });
+              // Actualizar con los nuevos valores
+              Object.assign(p, d.updates, { id: d.id });
+              const headers = gastosSheet.getRange(1,1,1,gastosSheet.getLastColumn()).getValues()[0];
+              const col2 = {}; headers.forEach((h,i) => { col2[h.toString().trim().toLowerCase()] = i; });
+              const row = new Array(headers.length).fill("");
+              const set = (names, val) => { for (const n of names) { const i = col2[n.toLowerCase()]; if (i !== undefined) { row[i] = val; return; } } };
+              set(["fecha","date"],              d.updates.compradoEn || rows[1] || "");
+              set(["n°","no","numero","n° factura"], d.id);
+              set(["proveedor","supplier"],      rows[SOL_H.indexOf("proveedor")]);
+              set(["descripción","descripcion"], rows[SOL_H.indexOf("descripcion")]);
+              set(["categoría","categoria"],     rows[SOL_H.indexOf("categoria")]);
+              set(["tipo","type"],               "Gasto");
+              set(["zona","zone"],               rows[SOL_H.indexOf("zona")]);
+              set(["detalle","detail"],          rows[SOL_H.indexOf("detalle")]);
+              set(["divisa","moneda"],           "DOP");
+              set(["monto","amount","monto dop"],rows[SOL_H.indexOf("monto")]);
+              set(["modo pago","modo de pago"],  rows[SOL_H.indexOf("modoPago")]);
+              set(["estado","status"],           "Pagado");
+              set(["comprado por","comprador"],  rows[SOL_H.indexOf("compradoPor")]);
+              set(["autorizado por","autorizado"],"Steve");
+              set(["factura","factura ref"],     d.updates.facturaRef || "");
+              gastosSheet.appendRow(row);
+            }
+          }
+          return respond({ success:true });
+        }
+      }
+      return respond({ success:false, error:"Solicitud no encontrada" });
+    }
+
+    // ── AÑADIR REEMBOLSO ──
+    if (d.action === "addReimbursement") {
+      const sheet = getSheet("Reembolsos", REIMB_H);
+      sheet.appendRow(REIMB_H.map(h => d.reimbursement[h] || ""));
+      return respond({ success:true });
+    }
+
+    // ── GUARDAR PINS ──
+    if (d.action === "savePins") {
+      const sheet = getSheet("Pins", PIN_H);
+      const last = sheet.getLastRow();
+      if (last > 1) sheet.getRange(2,1,last-1,2).clearContent();
+      const rows = Object.entries(d.pins).map(([u,p]) => [u,p]);
+      if (rows.length) sheet.getRange(2,1,rows.length,2).setValues(rows);
+      return respond({ success:true });
+    }
+
+    return respond({ success:false, error:"Acción desconocida" });
+  } catch(err) {
+    return respond({ success:false, error:err.message });
+  }
+}`;
+
+// ── COMPONENTES BASE ──────────────────────────────────────────────
+function Badge({ estado }) {
+  const s = STATUS_INFO[estado]||STATUS_INFO.pendiente_astrid;
+  return <span style={{ background:s.bg, color:s.color, fontSize:11, fontWeight:700, padding:"3px 10px", borderRadius:20, whiteSpace:"nowrap" }}>{s.icon} {s.label}</span>;
+}
+function Card({ children, style={} }) {
+  return <div style={{ background:C.card, borderRadius:16, border:`1px solid ${C.border}`, padding:18, marginBottom:14, boxShadow:"0 2px 8px rgba(0,0,0,0.05)", ...style }}>{children}</div>;
+}
+function Btn({ children, onClick, variant="primary", disabled, full, small, style={} }) {
+  const V={primary:{background:C.primary,color:"#fff",border:"none"},accent:{background:C.accent,color:"#fff",border:"none"},danger:{background:C.danger,color:"#fff",border:"none"},success:{background:C.success,color:"#fff",border:"none"},info:{background:C.info,color:"#fff",border:"none"},outline:{background:"transparent",color:C.primary,border:`1.5px solid ${C.primary}`},ghost:{background:"transparent",color:C.muted,border:"none"}};
+  return <button onClick={onClick} disabled={disabled} style={{...V[variant],padding:small?"9px 16px":"13px 20px",borderRadius:12,fontWeight:700,fontSize:small?13:15,opacity:disabled?0.5:1,width:full?"100%":undefined,cursor:disabled?"not-allowed":"pointer",fontFamily:"inherit",minHeight:small?38:48,display:"inline-flex",alignItems:"center",justifyContent:"center",gap:6,...style}}>{children}</button>;
+}
+const iStyle={width:"100%",padding:"13px 14px",borderRadius:12,border:`1.5px solid ${C.border}`,fontSize:16,background:"#FAFAF8",fontFamily:"inherit",outline:"none",minHeight:48};
+function F({ label, required, children }) {
+  return <div style={{marginBottom:16}}><label style={{display:"block",fontSize:12,fontWeight:700,color:C.textL,marginBottom:6,textTransform:"uppercase",letterSpacing:0.7}}>{label}{required&&" *"}</label>{children}</div>;
+}
+function TI({ label, value, onChange, required, type="text", placeholder }) {
+  return <F label={label} required={required}><input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder} style={iStyle}/></F>;
+}
+function SI({ label, value, onChange, options, required, allowCustom }) {
+  const [c,setC]=useState(false);
+  return <F label={label} required={required}>{c?<input value={value} onChange={e=>onChange(e.target.value)} placeholder="Escribe..." style={iStyle}/>:<select value={value} onChange={e=>{if(allowCustom&&e.target.value==="__o__"){setC(true);onChange("");}else onChange(e.target.value);}} style={iStyle}><option value="">Seleccionar...</option>{options.map(o=><option key={o} value={o}>{o}</option>)}{allowCustom&&<option value="__o__">+ Escribir otro...</option>}</select>}</F>;
+}
+function Alerta({ type, children }) {
+  const T={success:[C.successL,C.success],danger:[C.dangerL,C.danger],info:[C.infoL,C.info],warning:["#FEF9E7","#D68910"]};
+  const [bg,col]=T[type]||T.info;
+  return <div style={{background:bg,color:col,padding:"12px 14px",borderRadius:10,marginBottom:14,fontSize:14,fontWeight:500}}>{children}</div>;
+}
+
+// ── SYNC STATUS BAR ───────────────────────────────────────────────
+function SyncBar({ status, lastSync, onRefresh }) {
+  const s = {
+    syncing: { bg:"#EBF5FB", color:C.info,    icon:"⟳", text:"Sincronizando..." },
+    ok:      { bg:C.successL, color:C.success, icon:"✓", text:`Actualizado ${lastSync ? lastSync : ""}` },
+    error:   { bg:C.dangerL,  color:C.danger,  icon:"!", text:"Error de conexión" },
+    offline: { bg:"#F8F9FA",  color:C.muted,   icon:"○", text:"Sin conexión — datos locales" },
+  }[status] || { bg:"#F8F9FA", color:C.muted, icon:"○", text:"" };
+
+  return (
+    <div style={{ background:s.bg, display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 16px", borderBottom:`1px solid ${C.border}` }}>
+      <span style={{ color:s.color, fontSize:12, fontWeight:600 }}>{s.icon} {s.text}</span>
+      <button onClick={onRefresh} style={{ background:"transparent", border:"none", color:s.color, fontSize:12, cursor:"pointer", fontFamily:"inherit", fontWeight:600, padding:"2px 8px" }}>↻ Actualizar</button>
+    </div>
+  );
+}
+
+// ── TECLADO PIN ───────────────────────────────────────────────────
+function NumPad({ value, onChange }) {
+  const keys=["1","2","3","4","5","6","7","8","9","","0","⌫"];
+  return (
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,maxWidth:280,margin:"0 auto"}}>
+      {keys.map((k,i)=>(
+        <button key={i} onClick={()=>{if(k==="")return;if(k==="⌫"){onChange(value.slice(0,-1));return;}if(value.length<4)onChange(value+k);}} disabled={k===""} style={{height:64,borderRadius:16,border:`1.5px solid ${C.border}`,background:k==="⌫"?C.dangerL:k===""?"transparent":C.card,color:k==="⌫"?C.danger:C.primary,fontSize:k==="⌫"?22:26,fontWeight:600,cursor:k===""?"default":"pointer",opacity:k===""?0:1,boxShadow:k===""?"none":"0 2px 6px rgba(0,0,0,0.07)",fontFamily:"inherit",WebkitTapHighlightColor:"transparent"}}
+          onMouseDown={e=>{if(k!=="")e.currentTarget.style.transform="scale(0.93)"}}
+          onMouseUp={e=>e.currentTarget.style.transform="scale(1)"}
+          onTouchStart={e=>{if(k!=="")e.currentTarget.style.transform="scale(0.93)"}}
+          onTouchEnd={e=>e.currentTarget.style.transform="scale(1)"}
+        >{k}</button>
+      ))}
+    </div>
+  );
+}
+
+// ── SETUP INICIAL (sin URL configurada) ───────────────────────────
+function SetupScreen({ onSave }) {
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+
+  const probar = async () => {
+    if (!url.trim()) return;
+    setLoading(true); setErr("");
+    try {
+      const r = await sheetPost(url.trim(), { action:"getData" });
+      if (r.success) { onSave(url.trim()); }
+      else setErr("Script responde pero con error: " + r.error);
+    } catch(e) { setErr("No se pudo conectar. Verifica la URL y que el script esté desplegado correctamente."); }
+    setLoading(false);
+  };
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"24px 16px",fontFamily:"'DM Sans',sans-serif"}}>
+      <div style={{fontSize:48,marginBottom:12}}>🌿</div>
+      <h1 style={{fontFamily:"'DM Serif Display',serif",fontSize:26,color:C.primary,marginBottom:6,textAlign:"center"}}>Finca Oasis</h1>
+      <p style={{color:C.muted,fontSize:13,marginBottom:32,textAlign:"center"}}>Introduce la URL del script para conectarte</p>
+      <div style={{width:"100%",maxWidth:420}}>
+        <Card>
+          <div style={{fontWeight:700,color:C.primary,fontSize:14,marginBottom:12}}>🔗 URL del Web App (Google Apps Script)</div>
+          <F label="URL del script" required>
+            <input value={url} onChange={e=>setUrl(e.target.value)} placeholder="https://script.google.com/macros/s/..." style={iStyle}/>
+          </F>
+          {err && <Alerta type="danger">{err}</Alerta>}
+          <Btn onClick={probar} disabled={loading||!url.trim()} full>{loading?"Conectando...":"Conectar y entrar →"}</Btn>
+        </Card>
+        <p style={{color:C.muted,fontSize:12,textAlign:"center",marginTop:8}}>Pide la URL a Steve si no la tienes</p>
+      </div>
+    </div>
+  );
+}
+
+// ── LOGIN ─────────────────────────────────────────────────────────
+function UserSelect({ onSelect }) {
+  const users=[{name:"Steve",sub:"Propietario",icon:"👑"},{name:"Astrid",sub:"Administradora",icon:"📋"},{name:"Saul",sub:"Compras / Terreno",icon:"🚚"},{name:"Rafa",sub:"Técnico / Mant.",icon:"🔧"}];
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:C.bg,padding:"24px 16px",fontFamily:"'DM Sans',sans-serif"}}>
+      <div style={{fontSize:52,marginBottom:10}}>🌿</div>
+      <h1 style={{fontFamily:"'DM Serif Display',serif",fontSize:28,color:C.primary,marginBottom:4,textAlign:"center"}}>Finca Oasis</h1>
+      <p style={{color:C.muted,marginBottom:36,fontSize:14,textAlign:"center"}}>¿Quién eres?</p>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,maxWidth:400,width:"100%"}}>
+        {users.map(u=>(
+          <div key={u.name} onClick={()=>onSelect(u.name)} style={{background:C.card,border:`2px solid ${C.border}`,borderRadius:18,padding:"22px 14px",cursor:"pointer",textAlign:"center",WebkitTapHighlightColor:"transparent",userSelect:"none"}}
+            onTouchStart={e=>{e.currentTarget.style.opacity="0.75";e.currentTarget.style.borderColor=C.primary;}}
+            onTouchEnd={e=>{e.currentTarget.style.opacity="1";e.currentTarget.style.borderColor=C.border;}}
+            onMouseDown={e=>{e.currentTarget.style.borderColor=C.primary;}}
+            onMouseUp={e=>{e.currentTarget.style.borderColor=C.border;}}>
+            <div style={{fontSize:36,marginBottom:8}}>{u.icon}</div>
+            <div style={{fontWeight:700,color:C.primary,fontSize:17}}>{u.name}</div>
+            <div style={{color:C.muted,fontSize:11,marginTop:3}}>{u.sub}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PinScreen({ user, pins, onSuccess, onBack }) {
+  const [pin,setPin]=useState(""); const [err,setErr]=useState(false); const [shake,setShake]=useState(false);
+  useEffect(()=>{
+    if(pin.length===4){
+      if(pin===(pins[user]||DEFAULT_PINS[user])){ onSuccess(); }
+      else { setShake(true); setErr(true); setTimeout(()=>{setPin("");setShake(false);setErr(false);},700); }
+    }
+  },[pin]);
+  return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:C.bg,padding:"24px 16px",fontFamily:"'DM Sans',sans-serif"}}>
+      <style>{`@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-8px)}40%,80%{transform:translateX(8px)}}`}</style>
+      <div style={{width:72,height:72,borderRadius:36,background:C.primary,display:"flex",alignItems:"center",justifyContent:"center",fontSize:34,marginBottom:16,boxShadow:"0 4px 16px rgba(27,67,50,0.25)"}}>{ICONS[user]}</div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:4}}>{user}</h2>
+      <p style={{color:C.muted,fontSize:14,marginBottom:36}}>Introduce tu código PIN</p>
+      <div style={{display:"flex",gap:16,marginBottom:36,animation:shake?"shake 0.5s ease":"none"}}>
+        {[0,1,2,3].map(i=>(
+          <div key={i} style={{width:18,height:18,borderRadius:9,background:i<pin.length?(err?C.danger:C.primary):"transparent",border:`2.5px solid ${i<pin.length?(err?C.danger:C.primary):C.border}`,transition:"background 0.15s"}}/>
+        ))}
+      </div>
+      {err && <div style={{color:C.danger,fontSize:14,fontWeight:600,marginBottom:20}}>PIN incorrecto</div>}
+      <NumPad value={pin} onChange={setPin}/>
+      <button onClick={onBack} style={{marginTop:32,background:"transparent",border:"none",color:C.muted,fontSize:14,cursor:"pointer",fontFamily:"inherit",fontWeight:500}}>← Cambiar de usuario</button>
+    </div>
+  );
+}
+
+// ── HEADER + NAVBAR ───────────────────────────────────────────────
+function Header({ user, onLogout }) {
+  return (
+    <div style={{background:C.primary,padding:"13px 16px",position:"sticky",top:0,zIndex:100,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      <div style={{fontFamily:"'DM Serif Display',serif",color:"#fff",fontSize:18}}>🌿 Finca Oasis</div>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <span style={{color:"rgba(255,255,255,0.8)",fontSize:13}}>{ICONS[user]} {user}</span>
+        <button onClick={onLogout} style={{background:"rgba(255,255,255,0.12)",color:"#fff",border:"none",padding:"7px 12px",borderRadius:8,cursor:"pointer",fontSize:13,fontFamily:"inherit",fontWeight:600}}>🔒 Salir</button>
+      </div>
+    </div>
+  );
+}
+
+function BottomNav({ user, view, setView, badgeAstrid, badgeSteve }) {
+  const tabs=user==="Steve"
+    ?[{id:"aprobaciones",label:"Aprobar",icon:"✅",badge:badgeSteve},{id:"dashboard",label:"Dashboard",icon:"📊"},{id:"encours",label:"Encours",icon:"💰"},{id:"config",label:"Config",icon:"⚙️"}]
+    :user==="Astrid"
+    ?[{id:"validar",label:"Validar",icon:"📋",badge:badgeAstrid},{id:"nueva",label:"Nueva",icon:"➕"},{id:"mis-compras",label:"Mis compras",icon:"🧾"},{id:"encours",label:"Encours",icon:"💰"}]
+    :[{id:"nueva",label:"Nueva",icon:"➕"},{id:"mis-compras",label:"Mis compras",icon:"🧾"},{id:"mi-encours",label:"Encours",icon:"💳"}];
+  return (
+    <div style={{position:"fixed",bottom:0,left:0,right:0,background:C.primary,display:"flex",paddingBottom:"env(safe-area-inset-bottom,0px)",zIndex:200,borderTop:"1px solid rgba(255,255,255,0.1)"}}>
+      {tabs.map(t=>(
+        <button key={t.id} onClick={()=>setView(t.id)} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:"10px 4px 8px",background:"transparent",border:"none",color:view===t.id?C.accent:"rgba(255,255,255,0.5)",fontFamily:"inherit",cursor:"pointer",WebkitTapHighlightColor:"transparent",position:"relative"}}>
+          {view===t.id&&<div style={{position:"absolute",top:0,left:"25%",right:"25%",height:2,background:C.accent,borderRadius:2}}/>}
+          <div style={{fontSize:20,position:"relative"}}>{t.icon}{t.badge>0&&<span style={{position:"absolute",top:-4,right:-7,background:"#E74C3C",color:"#fff",fontSize:10,fontWeight:700,width:16,height:16,borderRadius:8,display:"flex",alignItems:"center",justifyContent:"center"}}>{t.badge}</span>}</div>
+          <div style={{fontSize:10,fontWeight:view===t.id?700:400,marginTop:3}}>{t.label}</div>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ── CONFIG ────────────────────────────────────────────────────────
+function ConfigView({ scriptUrl, pins, setPins, api }) {
+  const [editPins,setEditPins]=useState({...pins});
+  const [showPins,setShowPins]=useState({Steve:false,Astrid:false,Saul:false,Rafa:false});
+  const [saving,setSaving]=useState(false);
+  const [ok,setOk]=useState(false);
+
+  const guardar = async () => {
+    for(const[u,p] of Object.entries(editPins)){if(!/^\d{4}$/.test(p)){alert(`PIN de ${u} debe ser 4 dígitos`);return;}}
+    setSaving(true);
+    try { setPins(editPins); setOk(true); setTimeout(()=>setOk(false),3000); }
+    catch(e){ alert("Error al guardar: "+e.message); }
+    setSaving(false);
+  };
+
+  return (
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:20}}>Configuración</h2>
+      <Card>
+        <div style={{fontWeight:700,color:C.primary,fontSize:15,marginBottom:4}}>🔐 Códigos PIN</div>
+        <p style={{color:C.muted,fontSize:13,marginBottom:16}}>4 dígitos por usuario. Comunica cada PIN en privado.</p>
+        {ok && <Alerta type="success">✅ PINs guardados y sincronizados</Alerta>}
+        {["Steve","Astrid","Saul","Rafa"].map(u=>(
+          <div key={u} style={{display:"flex",alignItems:"center",gap:12,marginBottom:14}}>
+            <div style={{width:36,height:36,borderRadius:18,background:C.primary,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>{ICONS[u]}</div>
+            <div style={{flex:1,fontWeight:600,fontSize:15,color:C.primary}}>{u}</div>
+            <div style={{position:"relative",width:120}}>
+              <input type={showPins[u]?"text":"password"} value={editPins[u]||""} maxLength={4}
+                onChange={e=>{const v=e.target.value.replace(/\D/g,"").slice(0,4); setEditPins(p=>({...p,[u]:v}));}}
+                style={{...iStyle,fontFamily:"monospace",fontSize:20,letterSpacing:6,textAlign:"center",paddingRight:36}}/>
+              <button onClick={()=>setShowPins(s=>({...s,[u]:!s[u]}))} style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",background:"transparent",border:"none",cursor:"pointer",fontSize:16,color:C.muted}}>{showPins[u]?"🙈":"👁"}</button>
+            </div>
+          </div>
+        ))}
+        <Btn onClick={guardar} disabled={saving} full>{saving?"Guardando...":"💾 Guardar PINs"}</Btn>
+      </Card>
+      <Card>
+        <div style={{fontWeight:700,color:C.primary,fontSize:14,marginBottom:8}}>📊 Conexión Google Sheets</div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 14px",background:C.successL,borderRadius:10}}>
+          <div style={{fontSize:13,color:C.success,fontWeight:600}}>✓ Script conectado y activo</div>
+          <div style={{fontSize:11,color:C.muted,wordBreak:"break-all",maxWidth:"60%",textAlign:"right"}}>{scriptUrl.slice(0,40)}...</div>
+        </div>
+        <p style={{color:C.muted,fontSize:12,marginTop:10}}>Para cambiar la URL, borra los datos del navegador y vuelve a entrar.</p>
+      </Card>
+      <Card style={{borderLeft:`4px solid ${C.accent}`}}>
+        <div style={{fontWeight:700,color:C.primary,fontSize:14,marginBottom:10}}>📄 Código del script (si necesitas reemplazarlo)</div>
+        <div style={{background:"#1a1a2e",color:"#a8ff78",fontFamily:"monospace",fontSize:10,padding:12,borderRadius:10,overflowY:"auto",maxHeight:160,lineHeight:1.7,whiteSpace:"pre-wrap",marginBottom:10}}>{SCRIPT_CODE.slice(0,400)}...</div>
+        <Btn small variant="outline" onClick={()=>{navigator.clipboard?.writeText(SCRIPT_CODE);alert("✅ Código copiado");}}>📋 Copiar código completo</Btn>
+      </Card>
+    </div>
+  );
+}
+
+// ── NUEVA SOLICITUD ───────────────────────────────────────────────
+function NuevaSolicitud({ user, onAdd }) {
+  const blank={proveedor:"",descripcion:"",categoria:"",zona:"",detalle:"",monto:"",modoPago:"Efectivo",urgente:false,nota:""};
+  const [form,setForm]=useState(blank); const [ok,setOk]=useState(false); const [loading,setLoading]=useState(false);
+  const s=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const enviar=async()=>{
+    if(!form.proveedor||!form.descripcion||!form.categoria||!form.zona||!form.monto){alert("Completa los campos obligatorios (*)");return;}
+    setLoading(true);
+    await onAdd({...form,monto:parseFloat(form.monto),compradoPor:user,estado:user==="Astrid"?"pendiente_steve":"pendiente_astrid",id:genId(),createdAt:hoy(),fecha:hoy()});
+    setForm(blank); setOk(true); setLoading(false); setTimeout(()=>setOk(false),4000);
+  };
+  return (
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:6}}>Nueva Solicitud</h2>
+      <p style={{color:C.muted,fontSize:13,marginBottom:20}}>{user==="Astrid"?"Tu solicitud irá directamente a Steve.":"Tu solicitud pasará primero por Astrid."}</p>
+      {ok&&<Alerta type="success">✅ Solicitud enviada y sincronizada</Alerta>}
+      <Card>
+        <SI label="Proveedor" value={form.proveedor} onChange={v=>s("proveedor",v)} options={OPTS.proveedores} required allowCustom/>
+        <SI label="Categoría" value={form.categoria} onChange={v=>s("categoria",v)} options={OPTS.categorias} required/>
+        <F label="Descripción" required><textarea value={form.descripcion} onChange={e=>s("descripcion",e.target.value)} placeholder="¿Qué se va a comprar exactamente?" rows={2} style={{...iStyle,resize:"vertical",minHeight:64}}/></F>
+        <SI label="Zona" value={form.zona} onChange={v=>s("zona",v)} options={OPTS.zonas} required/>
+        <TI label="Detalle adicional" value={form.detalle} onChange={v=>s("detalle",v)} placeholder="Ej: para GEN-01, referencia AC-03..."/>
+        <TI label="Monto (DOP)" value={form.monto} onChange={v=>s("monto",v)} type="number" required placeholder="0"/>
+        <SI label="Modo de pago" value={form.modoPago} onChange={v=>s("modoPago",v)} options={OPTS.modoPago}/>
+        <F label="Nota (opcional)"><textarea value={form.nota} onChange={e=>s("nota",e.target.value)} rows={2} placeholder="Urgencia, contexto..." style={{...iStyle,resize:"vertical",minHeight:64}}/></F>
+        <label style={{display:"flex",alignItems:"center",gap:10,marginBottom:20,cursor:"pointer",fontSize:15,fontWeight:500}}>
+          <input type="checkbox" checked={form.urgente} onChange={e=>s("urgente",e.target.checked)} style={{width:20,height:20,accentColor:C.danger}}/>
+          ⚡ Marcar como urgente
+        </label>
+        <Btn onClick={enviar} disabled={loading} full>{loading?"Enviando...":"Enviar solicitud →"}</Btn>
+      </Card>
+    </div>
+  );
+}
+
+// ── MIS COMPRAS ───────────────────────────────────────────────────
+function MisCompras({ user, purchases, onUpdate }) {
+  const [inv,setInv]=useState({id:null,ref:"",nota:""}); const [loading,setLoading]=useState(null);
+  const mine=[...purchases.filter(p=>p.compradoPor===user)].sort((a,b)=>b.createdAt.localeCompare(a.createdAt));
+  const confirmar=async(p)=>{
+    if(!inv.ref.trim()){alert("Indica el número de factura");return;}
+    const ref=`${inv.ref}${inv.nota?` — ${inv.nota}`:""}`;
+    setLoading(p.id);
+    await onUpdate(p.id,{estado:"comprado",facturaRef:ref,compradoEn:hoy(),sincronizado:true});
+    setLoading(null); setInv({id:null,ref:"",nota:""});
+  };
+  return (
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:4}}>Mis Compras</h2>
+      <p style={{color:C.muted,fontSize:13,marginBottom:20}}>{mine.length} solicitudes</p>
+      {mine.length===0&&<Card><p style={{textAlign:"center",color:C.muted,padding:"28px 0"}}>No tienes solicitudes aún</p></Card>}
+      {mine.map(p=>{
+        const si=STATUS_INFO[p.estado];
+        return(
+          <Card key={p.id} style={{borderLeft:`4px solid ${si?.color||C.border}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:8,gap:10}}>
+              <div style={{flex:1}}><div style={{fontWeight:700,fontSize:16,color:C.primary}}>{p.proveedor}</div><div style={{fontSize:13,color:C.textL,marginTop:2}}>{p.descripcion}</div></div>
+              <div style={{textAlign:"right",flexShrink:0}}><div style={{fontWeight:800,fontSize:17,color:C.primary}}>{fmtDOP(p.monto)}</div></div>
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
+              <Badge estado={p.estado}/>
+              {p.urgente&&<span style={{background:C.dangerL,color:C.danger,fontSize:11,fontWeight:700,padding:"3px 10px",borderRadius:20}}>⚡ Urgente</span>}
+            </div>
+            <div style={{fontSize:12,color:C.muted}}>{p.zona} · {p.categoria} · {p.createdAt}</div>
+            {p.estado==="rechazado"&&<div style={{marginTop:10}}><Alerta type="danger">Rechazado: {p.motivoRechazo||"sin motivo"}</Alerta></div>}
+            {p.estado==="aprobado"&&(
+              <div style={{marginTop:10}}>
+                <Alerta type="success">✅ Aprobado — ya puedes comprar. Guarda la factura original.</Alerta>
+                {loading===p.id?<div style={{textAlign:"center",padding:"14px 0",color:C.muted}}>⏳ Guardando en Google Sheets...</div>
+                :inv.id===p.id?(
+                  <div style={{background:C.accentL,padding:14,borderRadius:12,border:`1px solid ${C.accent}`}}>
+                    <TI label="N° de factura / referencia *" value={inv.ref} onChange={v=>setInv(f=>({...f,ref:v}))} placeholder="Ej: FAC-2025-001" required/>
+                    <TI label="Nota adicional (opcional)" value={inv.nota} onChange={v=>setInv(f=>({...f,nota:v}))} placeholder="Monto exacto, observaciones..."/>
+                    <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                      <Btn variant="success" onClick={()=>confirmar(p)} style={{flex:1}}>✅ Confirmar + Guardar en Sheet</Btn>
+                      <Btn variant="ghost" onClick={()=>setInv({id:null,ref:"",nota:""})} style={{flex:1}}>Cancelar</Btn>
+                    </div>
+                  </div>
+                ):<Btn variant="accent" onClick={()=>setInv({id:p.id,ref:"",nota:""})} full>🧾 Registrar compra realizada</Btn>}
+              </div>
+            )}
+            {p.estado==="comprado"&&p.facturaRef&&<div style={{marginTop:8}}><Alerta type="success">🧾 {p.facturaRef} · 📊 Registrado en Sheet</Alerta></div>}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── MI ENCOURS (personal) ─────────────────────────────────────────
+function MiEncours({ user, purchases, reimbursements }) {
+  const porReemb=purchases.filter(p=>p.compradoPor===user&&p.estado==="comprado");
+  const gastado=porReemb.reduce((s,p)=>s+p.monto,0);
+  const reembTotal=reimbursements.filter(r=>r.persona===user).reduce((s,r)=>s+r.monto,0);
+  const saldo=gastado-reembTotal;
+  return(
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:20}}>Mi Encours</h2>
+      <Card style={{background:C.primary,color:"#fff",padding:22}}>
+        <div style={{fontSize:12,opacity:0.65,fontWeight:700,letterSpacing:0.7,textTransform:"uppercase",marginBottom:6}}>Steve te debe reembolsar</div>
+        <div style={{fontSize:38,fontWeight:800,marginBottom:4}}>{fmtDOP(Math.max(0,saldo))}</div>
+        <div style={{fontSize:13,opacity:0.7}}>Pago el día 30 de cada mes</div>
+      </Card>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
+        {[["💵",fmtDOP(gastado),"Total avanzado"],["✅",fmtDOP(reembTotal),"Ya reembolsado"]].map(([i,v,l])=>(
+          <Card key={l} style={{padding:"14px 16px",textAlign:"center"}}><div style={{fontSize:22}}>{i}</div><div style={{fontSize:17,fontWeight:800,color:C.primary,marginTop:4}}>{v}</div><div style={{fontSize:11,color:C.muted,marginTop:2}}>{l}</div></Card>
+        ))}
+      </div>
+      <Card>
+        <div style={{fontSize:13,fontWeight:700,color:C.primary,marginBottom:12}}>Compras pendientes ({porReemb.length})</div>
+        {porReemb.length===0&&<p style={{color:C.muted,fontSize:13}}>Sin compras pendientes</p>}
+        {porReemb.map(p=>(
+          <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"10px 12px",background:C.bg,borderRadius:10,marginBottom:8}}>
+            <div><div style={{fontSize:14,fontWeight:600}}>{p.proveedor}</div><div style={{fontSize:12,color:C.muted}}>{p.createdAt} · {p.zona}</div></div>
+            <div style={{fontWeight:700,fontSize:14}}>{fmtDOP(p.monto)}</div>
+          </div>
+        ))}
+      </Card>
+      <Card>
+        <div style={{fontSize:13,fontWeight:700,color:C.primary,marginBottom:12}}>Reembolsos recibidos</div>
+        {reimbursements.filter(r=>r.persona===user).length===0?<p style={{color:C.muted,fontSize:13}}>Sin reembolsos aún</p>
+        :[...reimbursements.filter(r=>r.persona===user)].reverse().map(r=>(
+          <div key={r.id} style={{display:"flex",justifyContent:"space-between",padding:"10px 12px",background:C.successL,borderRadius:10,marginBottom:8}}>
+            <div style={{fontSize:13,color:C.textL}}>{r.fecha}{r.nota?` — ${r.nota}`:""}</div>
+            <div style={{fontWeight:700,color:C.success}}>{fmtDOP(r.monto)}</div>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+// ── ENCOURS TOTAL (Steve + Astrid) ────────────────────────────────
+function EncoursTotal({ purchases, reimbursements, canReimburse, onAddReimbursement }) {
+  const [form,setForm]=useState({persona:"",monto:"",nota:""}); const [ok,setOk]=useState(false); const [loading,setLoading]=useState(false);
+  const s=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const getEnc=p=>{
+    const g=purchases.filter(x=>x.compradoPor===p&&x.estado==="comprado").reduce((a,x)=>a+x.monto,0);
+    const r=reimbursements.filter(x=>x.persona===p).reduce((a,x)=>a+x.monto,0);
+    return g-r;
+  };
+  const total=["Astrid","Saul","Rafa"].reduce((a,e)=>a+Math.max(0,getEnc(e)),0);
+  const registrar=async()=>{
+    if(!form.persona||!form.monto){alert("Selecciona empleado y monto");return;}
+    setLoading(true);
+    await onAddReimbursement({...form,monto:parseFloat(form.monto),id:genId(),fecha:hoy()});
+    setForm({persona:"",monto:"",nota:""}); setOk(true); setLoading(false); setTimeout(()=>setOk(false),3000);
+  };
+  return(
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:4}}>Encours del equipo</h2>
+      <p style={{color:C.muted,fontSize:13,marginBottom:20}}>Saldo a reembolsar a cada empleado el día 30</p>
+      <Card style={{background:C.primary,color:"#fff",padding:22,marginBottom:16}}>
+        <div style={{fontSize:12,opacity:0.65,fontWeight:700,letterSpacing:0.7,textTransform:"uppercase",marginBottom:6}}>Total a preparar para el día 30</div>
+        <div style={{fontSize:36,fontWeight:800}}>{fmtDOP(total)}</div>
+      </Card>
+      {["Astrid","Saul","Rafa"].map(e=>{
+        const enc=getEnc(e);
+        const compras=purchases.filter(p=>p.compradoPor===e&&p.estado==="comprado");
+        const reemb=reimbursements.filter(r=>r.persona===e).reduce((a,r)=>a+r.monto,0);
+        return(
+          <Card key={e} style={{borderTop:`4px solid ${enc>500?C.accent:C.success}`,padding:"16px 18px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:compras.length>0?10:0}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div style={{width:36,height:36,borderRadius:18,background:C.primary,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>{ICONS[e]}</div>
+                <div><div style={{fontWeight:700,fontSize:16,color:C.primary}}>{e}</div><div style={{fontSize:12,color:C.muted}}>{compras.length} compras · Reemb: {fmtDOP(reemb)}</div></div>
+              </div>
+              <div style={{fontSize:22,fontWeight:800,color:enc>0?C.warning:C.success}}>{fmtDOP(Math.max(0,enc))}</div>
+            </div>
+            {compras.length>0&&(
+              <div style={{borderTop:`1px solid ${C.border}`,paddingTop:10}}>
+                {compras.map(p=>(
+                  <div key={p.id} style={{display:"flex",justifyContent:"space-between",padding:"7px 10px",background:C.bg,borderRadius:8,marginBottom:6}}>
+                    <div><div style={{fontSize:13,fontWeight:600}}>{p.proveedor}</div><div style={{fontSize:11,color:C.muted}}>{p.createdAt} · {p.zona}</div></div>
+                    <div style={{fontWeight:700,fontSize:13}}>{fmtDOP(p.monto)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        );
+      })}
+      {/* Historial reembolsos */}
+      <Card>
+        <div style={{fontSize:13,fontWeight:700,color:C.primary,marginBottom:12}}>💸 Historial de reembolsos</div>
+        {reimbursements.length===0?<p style={{color:C.muted,fontSize:13}}>Sin reembolsos registrados</p>
+        :[...reimbursements].reverse().map(r=>(
+          <div key={r.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",background:C.successL,borderRadius:10,marginBottom:8}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div style={{width:28,height:28,borderRadius:14,background:C.primary,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>{ICONS[r.persona]||"👤"}</div>
+              <div><div style={{fontWeight:700,fontSize:13,color:C.primary}}>{r.persona}</div><div style={{fontSize:11,color:C.muted}}>{r.fecha}{r.nota?` — ${r.nota}`:""}</div></div>
+            </div>
+            <div style={{fontWeight:800,fontSize:14,color:C.success}}>+{fmtDOP(r.monto)}</div>
+          </div>
+        ))}
+      </Card>
+      {/* Registrar reembolso — solo Steve */}
+      {canReimburse&&(
+        <Card>
+          <div style={{fontSize:13,fontWeight:700,color:C.primary,marginBottom:14}}>Registrar Reembolso</div>
+          {ok&&<Alerta type="success">✅ Reembolso registrado y sincronizado</Alerta>}
+          <SI label="Empleado" value={form.persona} onChange={v=>s("persona",v)} options={["Astrid","Saul","Rafa"]} required/>
+          <TI label="Monto (DOP)" value={form.monto} onChange={v=>s("monto",v)} type="number" required placeholder="0"/>
+          <TI label="Nota (opcional)" value={form.nota} onChange={v=>s("nota",v)} placeholder="Ej: transferencia, efectivo..."/>
+          <Btn onClick={registrar} disabled={loading} full>{loading?"Guardando...":"Registrar reembolso 💸"}</Btn>
+        </Card>
+      )}
+      {!canReimburse&&<div style={{background:C.infoL,color:C.info,padding:"10px 14px",borderRadius:10,fontSize:13,fontWeight:500}}>ℹ️ Los reembolsos los registra Steve desde su perfil.</div>}
+    </div>
+  );
+}
+
+// ── VALIDAR (Astrid) ──────────────────────────────────────────────
+function ValidarSolicitudes({ purchases, onUpdate }) {
+  const [rechId,setRechId]=useState(null); const [motivo,setMotivo]=useState(""); const [loading,setLoading]=useState(null);
+  const pendientes=[...purchases.filter(p=>p.estado==="pendiente_astrid")].sort((a,b)=>(b.urgente?1:0)-(a.urgente?1:0));
+  const doEnviar=async id=>{setLoading(id);await onUpdate(id,{estado:"pendiente_steve",revisadoPorAstrid:hoy()});setLoading(null);};
+  const doRechazar=async id=>{if(!motivo.trim()){alert("Indica el motivo");return;}setLoading(id);await onUpdate(id,{estado:"rechazado",motivoRechazo:motivo,rechazadoPor:"Astrid",rechazadoEn:hoy()});setLoading(null);setRechId(null);setMotivo("");};
+  return(
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:4}}>Solicitudes Pendientes</h2>
+      <p style={{color:C.muted,fontSize:13,marginBottom:20}}>{pendientes.length} de Saul y Rafa esperando tu validación</p>
+      {pendientes.length===0&&<Card><div style={{textAlign:"center",padding:"32px 0",color:C.muted}}><div style={{fontSize:44,marginBottom:8}}>✅</div><p style={{fontWeight:600}}>Todo al día</p></div></Card>}
+      {pendientes.map(p=>(
+        <Card key={p.id} style={{borderLeft:`4px solid ${p.urgente?C.danger:C.accent}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:10,gap:10}}>
+            <div style={{flex:1}}>
+              {p.urgente&&<div style={{background:C.dangerL,color:C.danger,fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:10,display:"inline-block",marginBottom:6}}>⚡ URGENTE</div>}
+              <div style={{fontWeight:700,fontSize:16,color:C.primary}}>{p.proveedor}</div>
+              <div style={{fontSize:13,color:C.textL,marginTop:2}}>{p.descripcion}</div>
+              <div style={{fontSize:12,color:C.muted,marginTop:4}}>Por: <strong>{p.compradoPor}</strong></div>
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}><div style={{fontWeight:800,fontSize:18,color:C.primary}}>{fmtDOP(p.monto)}</div></div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+            {[["Categoría",p.categoria],["Zona",p.zona],["Modo pago",p.modoPago],["Detalle",p.detalle||"—"]].map(([k,v])=>(
+              <div key={k} style={{background:C.bg,padding:"8px 10px",borderRadius:8}}><div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{k}</div><div style={{fontSize:13,fontWeight:500}}>{v}</div></div>
+            ))}
+          </div>
+          {p.nota&&<Alerta type="warning">💬 {p.nota}</Alerta>}
+          {loading===p.id?<div style={{textAlign:"center",padding:"12px 0",color:C.muted}}>⏳ Sincronizando...</div>
+          :rechId===p.id?(
+            <div style={{background:C.dangerL,padding:14,borderRadius:12,border:`1px solid ${C.danger}`}}>
+              <TI label="Motivo del rechazo *" value={motivo} onChange={setMotivo} placeholder="Explica el motivo..." required/>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                <Btn variant="danger" onClick={()=>doRechazar(p.id)} style={{flex:1}}>Confirmar rechazo</Btn>
+                <Btn variant="ghost" onClick={()=>{setRechId(null);setMotivo("");}} style={{flex:1}}>Cancelar</Btn>
+              </div>
+            </div>
+          ):(
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <Btn variant="info" onClick={()=>doEnviar(p.id)} style={{flex:1}}>📤 Enviar a Steve</Btn>
+              <Btn variant="danger" onClick={()=>setRechId(p.id)} style={{flex:1}}>❌ Rechazar</Btn>
+            </div>
+          )}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// ── APROBACIONES (Steve) ──────────────────────────────────────────
+function Aprobaciones({ purchases, onUpdate }) {
+  const [rechId,setRechId]=useState(null); const [motivo,setMotivo]=useState(""); const [loading,setLoading]=useState(null);
+  const pendientes=[...purchases.filter(p=>p.estado==="pendiente_steve")].sort((a,b)=>(b.urgente?1:0)-(a.urgente?1:0));
+  const doAprobar=async id=>{setLoading(id);await onUpdate(id,{estado:"aprobado",aprobadoEn:hoy()});setLoading(null);};
+  const doRechazar=async id=>{if(!motivo.trim()){alert("Indica el motivo");return;}setLoading(id);await onUpdate(id,{estado:"rechazado",motivoRechazo:motivo,rechazadoPor:"Steve",rechazadoEn:hoy()});setLoading(null);setRechId(null);setMotivo("");};
+  return(
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:4}}>Aprobaciones</h2>
+      <p style={{color:C.muted,fontSize:13,marginBottom:20}}>{pendientes.length} solicitud{pendientes.length!==1?"es":""} validadas por Astrid — esperando tu autorización</p>
+      {pendientes.length===0&&<Card><div style={{textAlign:"center",padding:"32px 0",color:C.muted}}><div style={{fontSize:44,marginBottom:8}}>✅</div><p style={{fontWeight:600}}>Sin solicitudes pendientes</p></div></Card>}
+      {pendientes.map(p=>(
+        <Card key={p.id} style={{borderLeft:`4px solid ${p.urgente?C.danger:C.primaryH}`}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:10,gap:10}}>
+            <div style={{flex:1}}>
+              {p.urgente&&<div style={{background:C.dangerL,color:C.danger,fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:10,display:"inline-block",marginBottom:6}}>⚡ URGENTE</div>}
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                <span style={{fontWeight:700,fontSize:16,color:C.primary}}>{p.proveedor}</span>
+                <span style={{background:"#eee",color:C.textL,fontSize:12,padding:"2px 8px",borderRadius:10}}>👤 {p.compradoPor}</span>
+              </div>
+              <div style={{fontSize:13,color:C.textL,marginTop:4}}>{p.descripcion}</div>
+              {p.revisadoPorAstrid&&<div style={{fontSize:12,color:C.success,marginTop:3}}>✓ Validado por Astrid</div>}
+            </div>
+            <div style={{textAlign:"right",flexShrink:0}}><div style={{fontWeight:800,fontSize:20,color:C.primary}}>{fmtDOP(p.monto)}</div></div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:12}}>
+            {[["Categoría",p.categoria],["Zona",p.zona],["Modo pago",p.modoPago],["Fecha",p.createdAt]].map(([k,v])=>(
+              <div key={k} style={{background:C.bg,padding:"8px 10px",borderRadius:8}}><div style={{fontSize:10,color:C.muted,fontWeight:700,textTransform:"uppercase",letterSpacing:0.5,marginBottom:2}}>{k}</div><div style={{fontSize:13,fontWeight:500}}>{v}</div></div>
+            ))}
+          </div>
+          {p.nota&&<Alerta type="warning">💬 {p.nota}</Alerta>}
+          {loading===p.id?<div style={{textAlign:"center",padding:"12px 0",color:C.muted}}>⏳ Sincronizando...</div>
+          :rechId===p.id?(
+            <div style={{background:C.dangerL,padding:14,borderRadius:12,border:`1px solid ${C.danger}`}}>
+              <TI label="Motivo del rechazo *" value={motivo} onChange={setMotivo} placeholder="Explica el motivo..." required/>
+              <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+                <Btn variant="danger" onClick={()=>doRechazar(p.id)} style={{flex:1}}>Confirmar rechazo</Btn>
+                <Btn variant="ghost" onClick={()=>{setRechId(null);setMotivo("");}} style={{flex:1}}>Cancelar</Btn>
+              </div>
+            </div>
+          ):(
+            <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+              <Btn variant="success" onClick={()=>doAprobar(p.id)} style={{flex:1}}>✅ Autorizar</Btn>
+              <Btn variant="danger" onClick={()=>setRechId(p.id)} style={{flex:1}}>❌ Rechazar</Btn>
+            </div>
+          )}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// ── DASHBOARD (Steve) ─────────────────────────────────────────────
+function Dashboard({ purchases, reimbursements }) {
+  const hoyStr=hoy(),mesStr=mesActual();
+  const gastoHoy=purchases.filter(p=>p.createdAt===hoyStr&&p.estado!=="rechazado").reduce((s,p)=>s+p.monto,0);
+  const gastoMes=purchases.filter(p=>p.createdAt.startsWith(mesStr)&&p.estado!=="rechazado").reduce((s,p)=>s+p.monto,0);
+  const aReemb=purchases.filter(p=>p.estado==="comprado").reduce((s,p)=>s+p.monto,0);
+  const pendSteve=purchases.filter(p=>p.estado==="pendiente_steve").length;
+  const pendAstrid=purchases.filter(p=>p.estado==="pendiente_astrid").length;
+  const last7=Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-(6-i));const ds=d.toISOString().slice(0,10);return{ds,day:d.toLocaleDateString("es-DO",{weekday:"short"}),total:purchases.filter(p=>p.createdAt===ds&&p.estado!=="rechazado").reduce((s,p)=>s+p.monto,0)};});
+  const maxBar=Math.max(...last7.map(d=>d.total),1);
+  const porEmp=["Astrid","Saul","Rafa"].map(e=>({name:e,total:purchases.filter(p=>p.compradoPor===e&&p.estado==="comprado").reduce((s,p)=>s+p.monto,0)}));
+  const maxEmp=Math.max(...porEmp.map(e=>e.total),1);
+  return(
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:20}}>Dashboard</h2>
+      {pendAstrid>0&&<Alerta type="warning">⏳ {pendAstrid} solicitud{pendAstrid!==1?"es":""} esperando validación de Astrid</Alerta>}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+        {[["📅",fmtDOP(gastoHoy),"Gastos hoy",C.primary],["📊",fmtDOP(gastoMes),"Gastos del mes",C.primaryH],["💸",fmtDOP(aReemb),"A reembolsar",C.warning],["⏳",pendSteve,"Pend. aprobación",pendSteve>0?C.danger:C.success]].map(([i,v,l,c])=>(
+          <Card key={l} style={{padding:"14px 16px"}}><div style={{fontSize:24,marginBottom:6}}>{i}</div><div style={{fontSize:18,fontWeight:800,color:c}}>{v}</div><div style={{fontSize:11,color:C.muted,marginTop:2}}>{l}</div></Card>
+        ))}
+      </div>
+      <Card>
+        <div style={{fontSize:13,fontWeight:700,color:C.primary,marginBottom:14}}>Volumen últimos 7 días (DOP)</div>
+        <div style={{display:"flex",alignItems:"flex-end",gap:6,height:100}}>
+          {last7.map(d=>(
+            <div key={d.ds} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}>
+              <div style={{fontSize:9,color:C.muted,height:14}}>{d.total>0?`${(d.total/1000).toFixed(0)}K`:""}</div>
+              <div style={{width:"100%",background:d.ds===hoyStr?C.accent:C.primaryH,borderRadius:"4px 4px 0 0",height:`${Math.max((d.total/maxBar)*78,d.total>0?4:2)}px`,transition:"height 0.4s",opacity:d.ds===hoyStr?1:0.65}}/>
+              <div style={{fontSize:11,color:C.muted}}>{d.day}</div>
+            </div>
+          ))}
+        </div>
+      </Card>
+      <Card>
+        <div style={{fontSize:13,fontWeight:700,color:C.primary,marginBottom:14}}>Por empleado</div>
+        {porEmp.map(e=>(
+          <div key={e.name} style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+            <div style={{width:54,fontWeight:700,fontSize:14}}>{e.name}</div>
+            <div style={{flex:1,background:C.bg,borderRadius:8,height:22,overflow:"hidden"}}><div style={{background:C.primaryH,height:"100%",width:`${(e.total/maxEmp)*100}%`,borderRadius:8,transition:"width 0.5s"}}/></div>
+            <div style={{fontSize:13,fontWeight:700,width:110,textAlign:"right"}}>{fmtDOP(e.total)}</div>
+          </div>
+        ))}
+      </Card>
+    </div>
+  );
+}
+
+// ── APP PRINCIPAL ─────────────────────────────────────────────────
+function App() {
+  const [scriptUrl, setScriptUrl] = useState(SCRIPT_URL_HARDCODED);
+  const [selectedUser, setSelectedUser] = useState(null);
+  const [user, setUser]           = useState(null);
+  const [view, setView]           = useState("nueva");
+  const [purchases, setPurchases] = useState([]);
+  const [reimb, setReimb]         = useState([]);
+  const [pins, setPins]           = useState(DEFAULT_PINS);
+  const [syncStatus, setSyncStatus] = useState("offline");
+  const [lastSync, setLastSync]   = useState("");
+  const [booting, setBooting]     = useState(false);
+  const pollRef = useRef(null);
+
+  // URL ya configurada desde el codigo. Cargar PINs de localStorage al inicio.
+  useEffect(() => {
+    try {
+      const localPins = JSON.parse(localStorage.getItem('fo_pins_v2') || '{}');
+      if (Object.keys(localPins).length > 0) {
+        setPins({...DEFAULT_PINS, ...localPins});
+      }
+    } catch {}
+    setBooting(false);
+  }, []);
+
+  // Fetch data desde Sheet
+  const fetchData = useCallback(async (url) => {
+    if (!url) return;
+    setSyncStatus("syncing");
+    try {
+      const r = await API.getData(url);
+      if (r.success) {
+        setPurchases(r.purchases || []);
+        setReimb(r.reimbursements || []);
+        // PINs: NUNCA sobreescribir desde Sheet, siempre usar localStorage
+        // (cada dispositivo guarda sus propios PINs)
+        const savedPins = localStorage.getItem('fo_pins_v2');
+        if (savedPins) {
+          try { setPins({...DEFAULT_PINS, ...JSON.parse(savedPins)}); } catch {}
+        }
+        setSyncStatus("ok");
+        setLastSync(new Date().toLocaleTimeString("es-DO",{hour:"2-digit",minute:"2-digit"}));
+      } else { setSyncStatus("error"); }
+    } catch { setSyncStatus("error"); }
+  }, []);
+
+  // Poll cada 30s cuando el usuario está logueado
+  useEffect(() => {
+    if (user && scriptUrl) {
+      fetchData(scriptUrl);
+      pollRef.current = setInterval(() => fetchData(scriptUrl), 30000);
+      return () => clearInterval(pollRef.current);
+    }
+  }, [user, scriptUrl]);
+
+  // Guardar URL y arrancar
+  const handleSetupSave = (url) => { setScriptUrl(url); };
+
+  // Acciones
+  const addPurchase = async (p) => {
+    setPurchases(prev => [...prev, p]); // optimistic
+    try { await API.addPurchase(scriptUrl, p); await fetchData(scriptUrl); } catch {}
+  };
+
+  const updatePurchase = async (id, updates) => {
+    setPurchases(prev => prev.map(p => p.id===id ? {...p,...updates} : p)); // optimistic
+    try { await API.updatePurchase(scriptUrl, id, updates); await fetchData(scriptUrl); } catch {}
+  };
+
+  const addReimbursement = async (r) => {
+    setReimb(prev => [...prev, r]); // optimistic
+    try { await API.addReimbursement(scriptUrl, r); await fetchData(scriptUrl); } catch {}
+  };
+
+  const savePins = async (newPins) => {
+    setPins(newPins);
+    // Guardar SOLO en localStorage - simple y siempre funciona
+    try { localStorage.setItem('fo_pins_v2', JSON.stringify(newPins)); } catch(e) { alert("Error: " + e.message); }
+  };
+
+  if (booting) return <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:C.bg,fontFamily:"'DM Sans',sans-serif",color:C.muted}}>🌿 Cargando...</div>;
+
+
+
+  // Login
+  if (!selectedUser) return (
+    <>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap'); *{box-sizing:border-box;margin:0;padding:0} input,select,textarea{font-family:inherit;font-size:16px!important;-webkit-appearance:none} button{-webkit-tap-highlight-color:transparent}`}</style>
+      <UserSelect onSelect={setSelectedUser}/>
+    </>
+  );
+
+  if (!user) return (
+    <>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap'); *{box-sizing:border-box;margin:0;padding:0} input,select,textarea{font-family:inherit;font-size:16px!important;-webkit-appearance:none} button{-webkit-tap-highlight-color:transparent}`}</style>
+      <PinScreen user={selectedUser} pins={pins} onSuccess={()=>{setUser(selectedUser);setView(selectedUser==="Steve"?"aprobaciones":selectedUser==="Astrid"?"validar":"nueva");}} onBack={()=>setSelectedUser(null)}/>
+    </>
+  );
+
+  const badgeAstrid=purchases.filter(p=>p.estado==="pendiente_astrid").length;
+  const badgeSteve=purchases.filter(p=>p.estado==="pendiente_steve").length;
+
+  return (
+    <div style={{minHeight:"100vh",background:C.bg,fontFamily:"'DM Sans',sans-serif",color:C.text}}>
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500;600;700&display=swap'); *{box-sizing:border-box;margin:0;padding:0} input,select,textarea{font-family:inherit;font-size:16px!important;-webkit-appearance:none} button{cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent} ::-webkit-scrollbar{width:4px} ::-webkit-scrollbar-thumb{background:${C.border};border-radius:3px}`}</style>
+      <Header user={user} onLogout={()=>{setUser(null);setSelectedUser(null);}}/>
+      <SyncBar status={syncStatus} lastSync={lastSync} onRefresh={()=>fetchData(scriptUrl)}/>
+      <div style={{padding:"16px 16px 110px",maxWidth:640,margin:"0 auto"}}>
+        {user==="Steve"  && view==="aprobaciones" && <Aprobaciones purchases={purchases} onUpdate={updatePurchase}/>}
+        {user==="Steve"  && view==="dashboard"    && <Dashboard purchases={purchases} reimbursements={reimb}/>}
+        {user==="Steve"  && view==="encours"      && <EncoursTotal purchases={purchases} reimbursements={reimb} canReimburse={true} onAddReimbursement={addReimbursement}/>}
+        {user==="Steve"  && view==="config"       && <ConfigView scriptUrl={scriptUrl} pins={pins} setPins={savePins} api={API}/>}
+        {user==="Astrid" && view==="validar"      && <ValidarSolicitudes purchases={purchases} onUpdate={updatePurchase}/>}
+        {user==="Astrid" && view==="nueva"        && <NuevaSolicitud user={user} onAdd={addPurchase}/>}
+        {user==="Astrid" && view==="mis-compras"  && <MisCompras user={user} purchases={purchases} onUpdate={updatePurchase}/>}
+        {user==="Astrid" && view==="encours"      && <EncoursTotal purchases={purchases} reimbursements={reimb} canReimburse={false} onAddReimbursement={addReimbursement}/>}
+        {(user==="Saul"||user==="Rafa") && view==="nueva"       && <NuevaSolicitud user={user} onAdd={addPurchase}/>}
+        {(user==="Saul"||user==="Rafa") && view==="mis-compras" && <MisCompras user={user} purchases={purchases} onUpdate={updatePurchase}/>}
+        {(user==="Saul"||user==="Rafa") && view==="mi-encours"  && <MiEncours user={user} purchases={purchases} reimbursements={reimb}/>}
+      </div>
+      <BottomNav user={user} view={view} setView={setView} badgeAstrid={badgeAstrid} badgeSteve={badgeSteve}/>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
