@@ -371,7 +371,7 @@ function Header({ user, onLogout }) {
 
 function BottomNav({ user, view, setView, badgeAstrid, badgeSteve }) {
   const tabs=user==="Steve"
-    ?[{id:"aprobaciones",label:"Aprobar",icon:"✅",badge:badgeSteve},{id:"dashboard",label:"Dashboard",icon:"📊"},{id:"encours",label:"Encours",icon:"💰"},{id:"config",label:"Config",icon:"⚙️"}]
+    ?[{id:"aprobaciones",label:"Aprobar",icon:"✅",badge:badgeSteve},{id:"dashboard",label:"Dashboard",icon:"📊"},{id:"historico",label:"Historial",icon:"📋"},{id:"encours",label:"Encours",icon:"💰"},{id:"config",label:"Config",icon:"⚙️"}]
     :user==="Astrid"
     ?[{id:"validar",label:"Validar",icon:"📋",badge:badgeAstrid},{id:"nueva",label:"Nueva",icon:"➕"},{id:"mis-compras",label:"Mis compras",icon:"🧾"},{id:"encours",label:"Encours",icon:"💰"}]
     :[{id:"nueva",label:"Nueva",icon:"➕"},{id:"mis-compras",label:"Mis compras",icon:"🧾"},{id:"mi-encours",label:"Encours",icon:"💳"}];
@@ -801,6 +801,93 @@ function Dashboard({ purchases, reimbursements }) {
   );
 }
 
+// ── HISTORICO STEVE ──────────────────────────────────────────────
+function HistoricoSteve({ purchases }) {
+  const [filtro, setFiltro] = useState("all");
+  
+  const todas = [...purchases]
+    .filter(p => ["aprobado","comprado","rechazado"].includes(p.estado) && p.rechazadoPor !== "Astrid")
+    .sort((a,b) => (b.aprobadoEn||b.rechazadoEn||b.createdAt).localeCompare(a.aprobadoEn||a.rechazadoEn||a.createdAt));
+
+  const filtradas = filtro === "all" ? todas
+    : filtro === "aprobadas" ? todas.filter(p => ["aprobado","comprado"].includes(p.estado))
+    : todas.filter(p => p.estado === "rechazado" && p.rechazadoPor === "Steve");
+
+  const totalAprobado = todas.filter(p => ["aprobado","comprado"].includes(p.estado)).reduce((s,p)=>s+p.monto,0);
+  const totalRechazado = todas.filter(p => p.estado==="rechazado" && p.rechazadoPor==="Steve").length;
+
+  return (
+    <div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",color:C.primary,fontSize:24,marginBottom:4}}>Mi Historial</h2>
+      <p style={{color:C.muted,fontSize:13,marginBottom:16}}>Todas tus decisiones de aprobación</p>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+        <Card style={{padding:"14px 16px",textAlign:"center"}}>
+          <div style={{fontSize:22,marginBottom:4}}>✅</div>
+          <div style={{fontSize:17,fontWeight:800,color:C.success}}>{fmtDOP(totalAprobado)}</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:2}}>Aprobado</div>
+        </Card>
+        <Card style={{padding:"14px 16px",textAlign:"center"}}>
+          <div style={{fontSize:22,marginBottom:4}}>❌</div>
+          <div style={{fontSize:17,fontWeight:800,color:C.danger}}>{totalRechazado}</div>
+          <div style={{fontSize:11,color:C.muted,marginTop:2}}>Rechazado{totalRechazado!==1?"s":""}</div>
+        </Card>
+      </div>
+
+      {/* Filtros */}
+      <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+        {[["all","Todo"],["aprobadas","Aprobadas"],["rechazadas","Rechazadas"]].map(([k,l])=>(
+          <button key={k} onClick={()=>setFiltro(k)} style={{
+            padding:"8px 16px",borderRadius:20,border:"none",fontFamily:"inherit",fontWeight:600,fontSize:13,cursor:"pointer",
+            background:filtro===k?C.primary:"#eee",color:filtro===k?"#fff":C.textL
+          }}>{l}</button>
+        ))}
+      </div>
+
+      {filtradas.length===0 && <Card><p style={{textAlign:"center",color:C.muted,padding:"24px 0"}}>Sin decisiones en esta categoría</p></Card>}
+
+      {filtradas.map(p=>{
+        const fecha = p.aprobadoEn||p.rechazadoEn||p.createdAt||"";
+        const aprobada = ["aprobado","comprado"].includes(p.estado);
+        return(
+          <Card key={p.id} style={{borderLeft:`4px solid ${aprobada?C.success:C.danger}`,padding:"14px 16px",marginBottom:10}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:4}}>
+                  <span style={{fontWeight:700,fontSize:15,color:C.primary}}>{p.proveedor}</span>
+                  <span style={{background:"#eee",color:C.textL,fontSize:11,padding:"2px 8px",borderRadius:10}}>👤 {p.compradoPor}</span>
+                </div>
+                <div style={{fontSize:13,color:C.textL,marginBottom:6}}>{p.descripcion}</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                  <span style={{fontSize:11,color:C.muted}}>{p.zona}</span>
+                  <span style={{fontSize:11,color:C.muted}}>·</span>
+                  <span style={{fontSize:11,color:C.muted}}>{p.categoria}</span>
+                  <span style={{fontSize:11,color:C.muted}}>·</span>
+                  <span style={{fontSize:11,color:C.muted}}>{fecha}</span>
+                </div>
+              </div>
+              <div style={{textAlign:"right",flexShrink:0}}>
+                <div style={{fontWeight:800,fontSize:16,color:C.primary,marginBottom:4}}>{fmtDOP(p.monto)}</div>
+                <Badge estado={p.estado}/>
+              </div>
+            </div>
+            {p.estado==="rechazado"&&p.motivoRechazo&&(
+              <div style={{background:C.dangerL,padding:"8px 10px",borderRadius:8,fontSize:12,color:C.danger,marginTop:8}}>
+                Motivo: {p.motivoRechazo}
+              </div>
+            )}
+            {p.estado==="comprado"&&p.facturaRef&&(
+              <div style={{background:C.successL,padding:"8px 10px",borderRadius:8,fontSize:12,color:C.success,marginTop:8}}>
+                🧾 {p.facturaRef}
+              </div>
+            )}
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── APP PRINCIPAL ─────────────────────────────────────────────────
 function App() {
   const [scriptUrl, setScriptUrl] = useState(SCRIPT_URL_HARDCODED);
@@ -912,6 +999,7 @@ function App() {
         {user==="Steve"  && view==="aprobaciones" && <Aprobaciones purchases={purchases} onUpdate={updatePurchase}/>}
         {user==="Steve"  && view==="dashboard"    && <Dashboard purchases={purchases} reimbursements={reimb}/>}
         {user==="Steve"  && view==="encours"      && <EncoursTotal purchases={purchases} reimbursements={reimb} canReimburse={true} onAddReimbursement={addReimbursement}/>}
+        {user==="Steve"  && view==="historico"    && <HistoricoSteve purchases={purchases}/>}
         {user==="Steve"  && view==="config"       && <ConfigView scriptUrl={scriptUrl} pins={pins} setPins={savePins} api={API}/>}
         {user==="Astrid" && view==="validar"      && <ValidarSolicitudes purchases={purchases} onUpdate={updatePurchase}/>}
         {user==="Astrid" && view==="nueva"        && <NuevaSolicitud user={user} onAdd={addPurchase}/>}
